@@ -1,0 +1,298 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: garden
+---
+apiVersion: v1
+data:
+  fluent-bit.conf: |-
+    [SERVICE]
+        Flush           30
+        Daemon          Off
+        Log_Level       info
+        Parsers_File    parsers.conf
+        HTTP_Server     On
+        HTTP_Listen     0.0.0.0
+        HTTP_PORT       2020
+
+
+    @INCLUDE input.conf
+    @INCLUDE output.conf
+  input.conf: |-
+    [INPUT]
+        Name              tail
+        Tag               kubernetes.*
+        Path              /var/log/containers/*.log
+        Exclude_Path      *_garden_fluent-bit-*.log,*_garden_loki-*.log
+        Parser            docker
+        DB                /var/log/flb_kube.db
+        DB.Sync           full
+        Skip_Long_Lines   On
+        Mem_Buf_Limit     30MB
+        Refresh_Interval  10
+        Ignore_Older      1800s
+  output.conf: |-
+    [OUTPUT]
+        Name file
+        Match *
+        Path /logs
+  parsers.conf: |-
+    # Custom parsers
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+        # Command      |  Decoder | Field | Optional Action
+        # =============|==================|=================
+        Decode_Field_As   escaped    log
+kind: ConfigMap
+metadata:
+  labels:
+    app: fluent-bit
+    role: logging
+  name: fluent-bit-config
+  namespace: garden
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit
+  namespace: garden
+spec:
+  ports:
+  - name: metrics
+    port: 2020
+    protocol: TCP
+    targetPort: 2020
+  selector:
+    app: fluent-bit
+    role: logging
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: fluent-bit
+    role: logging
+  name: fluent-bit
+  namespace: garden
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+      role: logging
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+        role: logging
+    spec:
+      automountServiceAccountToken: true
+      containers:
+      - command:
+        - /fluent-bit/bin/fluent-bit
+        - -c
+        - /fluent-bit/etc/fluent-bit.conf
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        image: fluent/fluent-bit:1.5.4-debug
+        name: fluent-bit
+        ports:
+        - containerPort: 2020
+          name: metrics
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 300m
+            memory: 400Mi
+          requests:
+            cpu: 150m
+            memory: 150Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /fluent-bit/etc
+          name: config
+        - mountPath: /var/log
+          name: varlog
+        - mountPath: /var/lib/docker/containers
+          name: varlibdockercontainers
+          readOnly: true
+        - mountPath: /logs
+          name: logs
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: fluent-bit-config
+        name: config
+      - hostPath:
+          path: /var/log
+          type: ""
+        name: varlog
+      - hostPath:
+          path: /var/lib/docker/containers
+          type: ""
+        name: varlibdockercontainers
+      - emptyDir: {}
+        name: logs
+# ---
+# apiVersion: v1
+# data:
+#   loki.yaml: "auth_enabled: false\ningester:\n  chunk_idle_period: 3m\n  chunk_block_size:
+#     262144\n  chunk_retain_period: 3m\n  max_transfer_retries: 3\n  lifecycler:\n
+#     \   ring:\n      kvstore:\n        store: inmemory\n      replication_factor:
+#     1\nlimits_config:\n  enforce_metric_name: false\n  reject_old_samples: true\n
+#     \ reject_old_samples_max_age: 168h\nschema_config:\n  configs:\n  - from: 2018-04-15\n
+#     \   store: boltdb\n    object_store: filesystem\n    schema: v11\n    index:\n
+#     \     prefix: index_\n      period: 24h\nserver:\n  http_listen_port: 3100\nstorage_config:\n
+#     \ boltdb:\n    directory: /data/loki/index\n  filesystem:\n    directory: /data/loki/chunks\nchunk_store_config:
+#     \n  max_look_back_period: 360h\ntable_manager:\n  retention_deletes_enabled: true\n
+#     \ retention_period: 360h"
+# kind: ConfigMap
+# metadata:
+#   labels:
+#     app: loki
+#     role: logging
+#   name: loki-config
+#   namespace: garden
+# ---
+# apiVersion: v1
+# kind: ServiceAccount
+# metadata:
+#   labels:
+#     app: loki
+#     role: logging
+#   name: loki
+#   namespace: garden
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   labels:
+#     app: loki
+#     role: logging
+#   name: loki
+#   namespace: garden
+# spec:
+#   ports:
+#   - name: metrics
+#     port: 3100
+#     protocol: TCP
+#     targetPort: metrics
+#   selector:
+#     app: loki
+#     role: logging
+#   sessionAffinity: None
+#   type: ClusterIP
+# ---
+# apiVersion: apps/v1
+# kind: StatefulSet
+# metadata:
+#   labels:
+#     app: loki
+#     role: logging
+#   name: loki
+#   namespace: garden
+# spec:
+#   selector:
+#     matchLabels:
+#       app: loki
+#       role: logging
+#   serviceName: ""
+#   template:
+#     metadata:
+#       labels:
+#         app: loki
+#         role: logging
+#     spec:
+#       containers:
+#       - args:
+#         - -config.file=/etc/loki/loki.yaml
+#         image: grafana/loki:1.6.0
+#         livenessProbe:
+#           failureThreshold: 3
+#           httpGet:
+#             path: /ready
+#             port: metrics
+#             scheme: HTTP
+#           initialDelaySeconds: 120
+#           periodSeconds: 10
+#           successThreshold: 1
+#           timeoutSeconds: 1
+#         name: loki
+#         ports:
+#         - containerPort: 3100
+#           name: metrics
+#           protocol: TCP
+#         readinessProbe:
+#           failureThreshold: 3
+#           httpGet:
+#             path: /ready
+#             port: metrics
+#             scheme: HTTP
+#           initialDelaySeconds: 120
+#           periodSeconds: 10
+#           successThreshold: 1
+#           timeoutSeconds: 1
+#         resources:
+#           limits:
+#             cpu: 500m
+#             memory: 526806k
+#           requests:
+#             cpu: 200m
+#             memory: 126806k
+#         securityContext:
+#           readOnlyRootFilesystem: true
+#         terminationMessagePath: /dev/termination-log
+#         terminationMessagePolicy: File
+#         volumeMounts:
+#         - mountPath: /etc/loki
+#           name: config
+#         - mountPath: /data
+#           name: loki
+#       dnsPolicy: ClusterFirst
+#       restartPolicy: Always
+#       schedulerName: default-scheduler
+#       securityContext:
+#         fsGroup: 10001
+#         runAsGroup: 10001
+#         runAsNonRoot: true
+#         runAsUser: 10001
+#       serviceAccount: loki
+#       serviceAccountName: loki
+#       terminationGracePeriodSeconds: 30
+#       volumes:
+#       - configMap:
+#           defaultMode: 420
+#           name: loki-config
+#         name: config
+#   updateStrategy:
+#     rollingUpdate:
+#       partition: 0
+#     type: RollingUpdate
+#   volumeClaimTemplates:
+#   - apiVersion: v1
+#     kind: PersistentVolumeClaim
+#     metadata:
+#       name: loki
+#     spec:
+#       accessModes:
+#       - ReadWriteOnce
+#       resources:
+#         requests:
+#           storage: 5Gi
+#       volumeMode: Filesystem

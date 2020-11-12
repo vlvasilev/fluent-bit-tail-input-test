@@ -1,0 +1,29 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logger
+  namespace: garden
+spec:
+  replicas: 100
+  selector:
+    matchLabels:
+      app: logger
+  template:
+    metadata:
+      labels:
+        app: logger
+    spec:
+      containers:
+      - name: logger
+        image: k8s.gcr.io/logs-generator:v0.1.1
+        args:
+          - /bin/sh
+          - -c
+          - |-
+            /logs-generator --logtostderr --log-lines-total=5000 --run-duration=60s
+
+            # Sleep forever to prevent restarts
+            while true; do
+              sleep 3600;
+            done
